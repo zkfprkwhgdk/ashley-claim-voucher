@@ -122,7 +122,7 @@ export default function App() {
 /* ═══ RequestForm ═══ */
 function RequestForm({ addRequest, showToast, onGoHistory, notice }) {
   const refs = {
-    category:useRef(), categoryEtc:useRef(), store:useRef(), date:useRef(),
+    category:useRef(), categoryEtc:useRef(), store:useRef(),
     custName:useRef(), custPhone:useRef(), custMember:useRef(),
     detail:useRef(), qty:useRef(), requester:useRef(),
   };
@@ -139,7 +139,7 @@ function RequestForm({ addRequest, showToast, onGoHistory, notice }) {
 
   const validate = () => {
     const errs={};
-    const req=["category","store","date","custName","custPhone","custMember","detail","qty","requester"];
+    const req=["category","store","custName","custPhone","custMember","detail","qty","requester"];
     if(v("category")==="기타") req.push("categoryEtc");
     req.forEach(k=>{if(!v(k)||(k==="qty"&&parseInt(v(k))<1)) errs[k]=true;});
     if(v("requester")&&!/\S+@\S+\.\S+/.test(v("requester"))) errs.requester=true;
@@ -157,14 +157,13 @@ function RequestForm({ addRequest, showToast, onGoHistory, notice }) {
     const entry={
       id:Date.now().toString(),created_at:new Date().toISOString(),
       category:v("category"),category_etc:v("category")==="기타"?v("categoryEtc"):"",
-      store:v("store"),date:v("date"),
+      store:v("store"),
       cust_name:v("custName"),cust_phone:v("custPhone"),cust_member:v("custMember"),
       detail:v("detail"),qty:parseInt(v("qty"))||1,requester:v("requester"),
       status:"대기",approved_date:"",issued_date:"",reject_reason:"",member_note:"",
     };
     await addRequest(entry);
     Object.values(refs).forEach(r=>{if(r.current)r.current.value="";});
-    if(refs.date.current)refs.date.current.value=new Date().toISOString().slice(0,10);
     if(refs.qty.current)refs.qty.current.value="1";
     if(refs.category.current)refs.category.current.value="";
     setShowEtc(false);setAgreeNotice(false);setHasReadNotice(false);setErrors({});
@@ -211,7 +210,6 @@ function RequestForm({ addRequest, showToast, onGoHistory, notice }) {
       </F>
       {showEtc&&<F label="기타 내용" err={errors.categoryEtc}><input ref={refs.categoryEtc} defaultValue="" placeholder="기타 구분 내용" style={{...S.input,...eS("categoryEtc")}}/></F>}
       <F label="요청매장" err={errors.store}><input ref={refs.store} defaultValue="" style={{...S.input,...eS("store")}}/></F>
-      <F label="요청일자" err={errors.date}><input ref={refs.date} type="date" defaultValue={new Date().toISOString().slice(0,10)} style={{...S.input,...eS("date")}}/></F>
       <F label="고객 성명" err={errors.custName}><input ref={refs.custName} defaultValue="" style={{...S.input,...eS("custName")}}/></F>
       <F label="고객 핸드폰 번호" err={errors.custPhone}><input ref={refs.custPhone} defaultValue="" placeholder="010-0000-0000" inputMode="tel" style={{...S.input,...eS("custPhone")}}/></F>
       <F label="고객 회원번호" err={errors.custMember}>
@@ -286,7 +284,7 @@ function HistoryTable({requests,masked,onApprove,onReject,onIssue,onDelete,membe
         <div key={r.id||i} style={S.card}>
           <div style={S.cardHeader}>
             <span style={{...S.statusBadge,...(STATUS_STYLE[r.status]||STATUS_STYLE["대기"])}}>{r.status}</span>
-            <span style={{fontSize:13,color:"#999"}}>{r.date}</span>
+            <span style={{fontSize:12,color:"#999"}}>{r.created_at?new Date(r.created_at).toLocaleString("ko-KR",{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</span>
           </div>
 
           {(()=>{
@@ -317,7 +315,8 @@ function HistoryTable({requests,masked,onApprove,onReject,onIssue,onDelete,membe
             <Row label="장수" value={`${r.qty}장`}/>
             <Row label="요청인" value={r.requester}/>
             {r.approved_date&&<Row label="승인일" value={r.approved_date}/>}
-            {r.issued_date&&<Row label="발급일" value={r.issued_date}/>}
+            {r.issued_date&&<Row label="발급(승인)일" value={r.issued_date}/>}
+            {r.issued_date&&(()=>{const d=new Date(r.issued_date);d.setDate(d.getDate()+1);return<Row label="발급 예정일" value={d.toISOString().slice(0,10)}/>;})()}
             {r.reject_reason&&<Row label="거절사유" value={r.reject_reason}/>}
           </div>
 
@@ -365,7 +364,7 @@ function HistoryTable({requests,masked,onApprove,onReject,onIssue,onDelete,membe
           {onIssue&&r.status==="승인완료"&&(
             <div style={S.adminActions}>
               <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                <label style={{fontSize:13,color:"#666"}}>발급일:</label>
+                <label style={{fontSize:13,color:"#666"}}>발급(승인)일:</label>
                 <input type="date" style={{...S.input,width:"auto",flex:1,minWidth:140}} defaultValue={new Date().toISOString().slice(0,10)} id={`date-${r.id}`}/>
               </div>
               <button style={{...S.issueBtn,marginTop:10,width:"100%"}} onClick={()=>{
@@ -407,8 +406,13 @@ function AdminView({requests,updateRequest,removeRequest,showToast,memberPopup,s
   const handleDelete=async id=>{await removeRequest(id);showToast("🗑️ 삭제 완료");};
 
   const downloadCSV=()=>{
-    const h=["구분","기타내용","매장","요청일","고객명","연락처","회원번호","세부내용","장수","요청인","상태","승인일","발급일","거절사유","회원메모"];
-    const rows=requests.map(r=>[r.category,r.category_etc||"",r.store,r.date,r.cust_name,r.cust_phone,r.cust_member||"",r.detail,r.qty,r.requester,r.status,r.approved_date||"",r.issued_date||"",r.reject_reason||"",r.member_note||""]);
+    const h=["구분","기타내용","매장","신청일시","고객명","연락처","회원번호","세부내용","장수","요청인","상태","승인일","발급(승인)일","발급예정일","거절사유","회원메모"];
+    const rows=requests.map(r=>{
+      let estDate="";
+      if(r.issued_date){const d=new Date(r.issued_date);d.setDate(d.getDate()+1);estDate=d.toISOString().slice(0,10);}
+      const reqTime=r.created_at?new Date(r.created_at).toLocaleString("ko-KR"):"";
+      return[r.category,r.category_etc||"",r.store,reqTime,r.cust_name,r.cust_phone,r.cust_member||"",r.detail,r.qty,r.requester,r.status,r.approved_date||"",r.issued_date||"",estDate,r.reject_reason||"",r.member_note||""];
+    });
     const csv="\uFEFF"+[h,...rows].map(row=>row.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
     const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"});
     const a=document.createElement("a");a.href=URL.createObjectURL(blob);
