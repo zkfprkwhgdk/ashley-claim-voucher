@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { supabase } from "./supabase.js";
 
 const ADMIN_PASSWORD = "ashley1!";
 const DEFAULT_NOTICE = `① 고객 애슐리멤버스 APP 다운로드/회원가입 여부 확인 필요
@@ -22,28 +23,59 @@ export default function App() {
   const [memberPopup, setMemberPopup] = useState(null);
   const [loaded, setLoaded] = useState(false);
 
+  // 초기 로드 + 실시간 구독
   useEffect(() => {
-    (async () => {
-      try { const d = localStorage.getItem("vr-requests"); if(d) setRequests(JSON.parse(d)); } catch {}
-      try { const d = localStorage.getItem("vr-notice"); if(d) setNotice(d); } catch {}
+    const load = async () => {
+      const { data } = await supabase.from("requests").select("*").order("created_at", { ascending: false });
+      if (data) setRequests(data);
+      const { data: s } = await supabase.from("settings").select("*").eq("key", "notice").single();
+      if (s?.value) setNotice(s.value);
       setLoaded(true);
-    })();
+    };
+    load();
+
+    // 실시간 구독 - requests 테이블 변경 감지
+    const channel = supabase.channel("realtime-requests")
+      .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, () => {
+        // 변경 발생 시 전체 재조회 (가장 안정적)
+        supabase.from("requests").select("*").order("created_at", { ascending: false }).then(({ data }) => {
+          if (data) setRequests(data);
+        });
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "settings" }, () => {
+        supabase.from("settings").select("*").eq("key", "notice").single().then(({ data }) => {
+          if (data?.value) setNotice(data.value);
+        });
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
   }, []);
 
-  const saveRequests = useCallback(async d => {
-    setRequests(d);
-    try { localStorage.setItem("vr-requests", JSON.stringify(d)); } catch {}
+  const addRequest = useCallback(async (entry) => {
+    await supabase.from("requests").insert(entry);
   }, []);
-  const saveNotice = useCallback(async t => {
-    setNotice(t);
-    try { localStorage.setItem("vr-notice", t); } catch {}
-  }, []);
-  const showToast = msg => { setToast(msg); setTimeout(()=>setToast(null),2500); };
 
-  if (!loaded) return <div style={S.loading}>로딩 중...</div>;
+  const updateRequest = useCallback(async (id, updates) => {
+    await supabase.from("requests").update(updates).eq("id", id);
+  }, []);
+
+  const removeRequest = useCallback(async (id) => {
+    await supabase.from("requests").delete().eq("id", id);
+  }, []);
+
+  const saveNotice = useCallback(async (text) => {
+    setNotice(text);
+    await supabase.from("settings").upsert({ key: "notice", value: text });
+  }, []);
+
+  const showToast = msg => { setToast(msg); setTimeout(() => setToast(null), 2500); };
+
+  if (!loaded) return <div style={S.loading}><div style={S.spinner}/><p style={{marginTop:12,color:"#999"}}>데이터 불러오는 중...</p></div>;
 
   return (
     <div style={S.root}>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
       {toast && <div style={S.toast}>{toast}</div>}
       <header style={S.header}>
         <div style={S.logo}><span style={{fontSize:22}}>🍽️</span><span style={S.logoText}>Ashley Queens</span></div>
@@ -59,7 +91,7 @@ export default function App() {
             <button style={{...S.tabBtn,...(tab==="request"?S.tabBtnActive:{})}} onClick={()=>setTab("request")}>식사권 신청</button>
             <button style={{...S.tabBtn,...(tab==="history"?S.tabBtnActive:{})}} onClick={()=>setTab("history")}>신청 내역</button>
           </div>
-          {tab==="request" && <RequestForm requests={requests} saveRequests={saveRequests} showToast={showToast} onGoHistory={()=>setTab("history")} notice={notice}/>}
+          {tab==="request" && <RequestForm addRequest={addRequest} showToast={showToast} onGoHistory={()=>setTab("history")} notice={notice}/>}
           {tab==="history" && <HistoryTable requests={requests} masked={true}/>}
         </div>
       )}
@@ -80,7 +112,7 @@ export default function App() {
       )}
 
       {view==="admin" && adminAuth && (
-        <AdminView requests={requests} saveRequests={saveRequests} showToast={showToast}
+        <AdminView requests={requests} updateRequest={updateRequest} removeRequest={removeRequest} showToast={showToast}
           memberPopup={memberPopup} setMemberPopup={setMemberPopup} notice={notice} saveNotice={saveNotice}/>
       )}
     </div>
@@ -88,10 +120,10 @@ export default function App() {
 }
 
 /* ═══ RequestForm ═══ */
-function RequestForm({ requests, saveRequests, showToast, onGoHistory, notice }) {
+function RequestForm({ addRequest, showToast, onGoHistory, notice }) {
   const refs = {
     category:useRef(), categoryEtc:useRef(), store:useRef(), date:useRef(),
-    reason:useRef(), custName:useRef(), custPhone:useRef(), custMember:useRef(),
+    custName:useRef(), custPhone:useRef(), custMember:useRef(),
     detail:useRef(), qty:useRef(), requester:useRef(),
   };
   const [showEtc, setShowEtc] = useState(false);
@@ -101,12 +133,13 @@ function RequestForm({ requests, saveRequests, showToast, onGoHistory, notice })
   const [agreeNotice, setAgreeNotice] = useState(false);
   const [agreeError, setAgreeError] = useState(false);
   const [showNotice, setShowNotice] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
   const v = k => refs[k]?.current?.value?.trim()||"";
 
   const validate = () => {
     const errs={};
-    const req=["category","store","date","reason","custName","custPhone","custMember","detail","qty","requester"];
+    const req=["category","store","date","custName","custPhone","custMember","detail","qty","requester"];
     if(v("category")==="기타") req.push("categoryEtc");
     req.forEach(k=>{if(!v(k)||(k==="qty"&&parseInt(v(k))<1)) errs[k]=true;});
     if(v("requester")&&!/\S+@\S+\.\S+/.test(v("requester"))) errs.requester=true;
@@ -118,21 +151,24 @@ function RequestForm({ requests, saveRequests, showToast, onGoHistory, notice })
   };
 
   const submit = async () => {
+    if(submitting) return;
     if(!validate()){showToast("필수 항목을 모두 입력해주세요");return;}
+    setSubmitting(true);
     const entry={
-      id:Date.now().toString(),createdAt:new Date().toISOString(),
-      category:v("category"),categoryEtc:v("category")==="기타"?v("categoryEtc"):"",
-      store:v("store"),date:v("date"),reason:v("reason"),
-      custName:v("custName"),custPhone:v("custPhone"),custMember:v("custMember"),
+      id:Date.now().toString(),created_at:new Date().toISOString(),
+      category:v("category"),category_etc:v("category")==="기타"?v("categoryEtc"):"",
+      store:v("store"),date:v("date"),
+      cust_name:v("custName"),cust_phone:v("custPhone"),cust_member:v("custMember"),
       detail:v("detail"),qty:parseInt(v("qty"))||1,requester:v("requester"),
-      status:"대기",approvedDate:"",issuedDate:"",rejectReason:"",memberNote:"",
+      status:"대기",approved_date:"",issued_date:"",reject_reason:"",member_note:"",
     };
-    await saveRequests([entry,...requests]);
+    await addRequest(entry);
     Object.values(refs).forEach(r=>{if(r.current)r.current.value="";});
     if(refs.date.current)refs.date.current.value=new Date().toISOString().slice(0,10);
     if(refs.qty.current)refs.qty.current.value="1";
     if(refs.category.current)refs.category.current.value="";
     setShowEtc(false);setAgreeNotice(false);setHasReadNotice(false);setErrors({});
+    setSubmitting(false);
     setSuccessPopup(true);
   };
 
@@ -143,7 +179,6 @@ function RequestForm({ requests, saveRequests, showToast, onGoHistory, notice })
     <div style={S.formWrap}>
       <h2 style={S.formTitle}>모바일 식사권 발급 요청</h2>
 
-      {/* ── 안내사항 최상단 ── */}
       <div style={{...S.noticeBox,marginBottom:24,...(agreeError&&!agreeNotice?{borderColor:"#e74c3c",background:"#fff5f5"}:{})}}>
         <button style={S.noticeReadBtn} onClick={()=>setShowNotice(true)}>
           {hasReadNotice?"✅ 안내사항 읽기 완료 (다시 보기)":"📋 안내사항 읽기 (필수)"}
@@ -169,7 +204,6 @@ function RequestForm({ requests, saveRequests, showToast, onGoHistory, notice })
         </div>
       )}
 
-      {/* ── 입력 필드 ── */}
       <F label="구분" err={errors.category}>
         <select ref={refs.category} defaultValue="" style={{...S.input,...S.select,...eS("category")}} onChange={e=>setShowEtc(e.target.value==="기타")}>
           <option value="">선택하세요</option><option value="마케팅용">마케팅용</option><option value="클레임용">클레임용</option><option value="기타">기타</option>
@@ -178,10 +212,12 @@ function RequestForm({ requests, saveRequests, showToast, onGoHistory, notice })
       {showEtc&&<F label="기타 내용" err={errors.categoryEtc}><input ref={refs.categoryEtc} defaultValue="" placeholder="기타 구분 내용" style={{...S.input,...eS("categoryEtc")}}/></F>}
       <F label="요청매장" err={errors.store}><input ref={refs.store} defaultValue="" style={{...S.input,...eS("store")}}/></F>
       <F label="요청일자" err={errors.date}><input ref={refs.date} type="date" defaultValue={new Date().toISOString().slice(0,10)} style={{...S.input,...eS("date")}}/></F>
-      <F label="요청사유" err={errors.reason}><input ref={refs.reason} defaultValue="" style={{...S.input,...eS("reason")}}/></F>
       <F label="고객 성명" err={errors.custName}><input ref={refs.custName} defaultValue="" style={{...S.input,...eS("custName")}}/></F>
       <F label="고객 핸드폰 번호" err={errors.custPhone}><input ref={refs.custPhone} defaultValue="" placeholder="010-0000-0000" inputMode="tel" style={{...S.input,...eS("custPhone")}}/></F>
-      <F label="고객 회원번호" err={errors.custMember}><input ref={refs.custMember} defaultValue="" placeholder="회원번호 입력" style={{...S.input,...eS("custMember")}}/></F>
+      <F label="고객 회원번호" err={errors.custMember}>
+        <input ref={refs.custMember} defaultValue="" placeholder="회원번호 입력" style={{...S.input,...eS("custMember")}}/>
+        <p style={{fontSize:12,color:"#888",margin:"5px 0 0 2px"}}>※ BO에서 검색하여 입력해주세요</p>
+      </F>
       <F label="세부내용 (클레임 내용)" err={errors.detail}><textarea ref={refs.detail} defaultValue="" rows={4} style={{...S.input,...S.textarea,...eS("detail")}}/></F>
       <F label="요청 식사권 장수" err={errors.qty}><input ref={refs.qty} type="number" min={1} defaultValue="1" inputMode="numeric" style={{...S.input,...eS("qty"),width:120}}/></F>
       <div style={{background:"#f9f0ff",border:"1px solid #e1bee7",borderRadius:10,padding:"12px 14px",marginTop:-8,marginBottom:16}}>
@@ -189,7 +225,9 @@ function RequestForm({ requests, saveRequests, showToast, onGoHistory, notice })
       </div>
       <F label="발급 요청인 (이메일)" err={errors.requester}><input ref={refs.requester} type="email" defaultValue="" placeholder="example@email.com" inputMode="email" style={{...S.input,...eS("requester")}}/></F>
 
-      <button style={S.submitBtn} onClick={submit}>발급 요청하기</button>
+      <button style={{...S.submitBtn,...(submitting?{opacity:0.6}:{})}} onClick={submit} disabled={submitting}>
+        {submitting?"요청 중...":"발급 요청하기"}
+      </button>
 
       {successPopup&&(
         <div style={S.popupOverlay} onClick={()=>setSuccessPopup(false)}>
@@ -209,13 +247,7 @@ function RequestForm({ requests, saveRequests, showToast, onGoHistory, notice })
 }
 
 function F({label,err,children}){
-  return(
-    <div style={S.field}>
-      <label style={S.label}>{label} <span style={S.req}>*</span></label>
-      {children}
-      {err&&<span style={S.errorSmall}>필수 입력 항목입니다</span>}
-    </div>
-  );
+  return(<div style={S.field}><label style={S.label}>{label} <span style={S.req}>*</span></label>{children}{err&&<span style={S.errorSmall}>필수 입력 항목입니다</span>}</div>);
 }
 
 /* ═══ Masking ═══ */
@@ -230,7 +262,7 @@ const STATUS_STYLE={
 };
 
 /* ═══ HistoryTable ═══ */
-function HistoryTable({requests,masked,onApprove,onReject,onIssue,onDelete,memberPopup,setMemberPopup,saveRequests}){
+function HistoryTable({requests,masked,onApprove,onReject,onIssue,onDelete,memberPopup,setMemberPopup,updateRequest}){
   const [search,setSearch]=useState("");
   const [rejectInputId,setRejectInputId]=useState(null);
   const [rejectReason,setRejectReason]=useState("");
@@ -239,7 +271,7 @@ function HistoryTable({requests,masked,onApprove,onReject,onIssue,onDelete,membe
   const filtered=requests.filter(r=>{
     if(!search)return true;
     const s=search.toLowerCase();
-    return[r.store,r.custName,r.requester,r.category,r.status].some(x=>x?.toLowerCase().includes(s));
+    return[r.store,r.cust_name,r.requester,r.category,r.status].some(x=>x?.toLowerCase().includes(s));
   });
 
   return(
@@ -252,77 +284,57 @@ function HistoryTable({requests,masked,onApprove,onReject,onIssue,onDelete,membe
 
       {filtered.map((r,i)=>(
         <div key={r.id||i} style={S.card}>
-          {/* 상태 + 단계 표시 */}
           <div style={S.cardHeader}>
             <span style={{...S.statusBadge,...(STATUS_STYLE[r.status]||STATUS_STYLE["대기"])}}>{r.status}</span>
             <span style={{fontSize:13,color:"#999"}}>{r.date}</span>
           </div>
 
-          {/* 3단계 프로그래스 */}
           {(()=>{
-            const s=r.status;
-            const isR=s==="승인거절";
-            const step1=true;
-            const step2=["승인완료","발급처리","승인거절"].includes(s);
-            const step3=s==="발급처리";
-            const dc="#7b1fa2",rc="#c62828",gray="#ddd",lgray="#eee";
-            const dotDone={width:12,height:12,borderRadius:"50%",background:isR&&!step3?rc:dc,border:"none"};
-            const dotOff={width:10,height:10,borderRadius:"50%",background:gray,border:"none"};
-            const lineDone={flex:1,height:3,background:isR?rc:dc,margin:"0 2px",marginBottom:18};
-            const lineOff={flex:1,height:3,background:lgray,margin:"0 2px",marginBottom:18};
-            const labelOn={fontSize:10,color:isR&&!step3?"#c62828":"#7b1fa2",fontWeight:700,whiteSpace:"nowrap"};
-            const labelOff={fontSize:10,color:"#bbb",fontWeight:600,whiteSpace:"nowrap"};
-            return(
-              <div style={{margin:"10px 0 14px",padding:"0 8px"}}>
-                <div style={{display:"flex",alignItems:"center"}}>
-                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-                    <div style={step1?dotDone:dotOff}/><span style={step1?labelOn:labelOff}>대기</span>
-                  </div>
-                  <div style={step2?lineDone:lineOff}/>
-                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-                    <div style={step2?dotDone:dotOff}/><span style={step2?labelOn:labelOff}>{isR?"거절":"승인"}</span>
-                  </div>
-                  <div style={step3?lineDone:lineOff}/>
-                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-                    <div style={step3?dotDone:dotOff}/><span style={step3?labelOn:labelOff}>발급</span>
-                  </div>
-                </div>
-              </div>
-            );
+            const s=r.status;const isR=s==="승인거절";
+            const step2=["승인완료","발급처리","승인거절"].includes(s);const step3=s==="발급처리";
+            const dc="#7b1fa2",rc="#c62828",gy="#ddd",lg="#eee";
+            const dOn={width:12,height:12,borderRadius:"50%",background:isR&&!step3?rc:dc};
+            const dOff={width:10,height:10,borderRadius:"50%",background:gy};
+            const lOn={flex:1,height:3,background:isR?rc:dc,margin:"0 2px",marginBottom:18};
+            const lOff={flex:1,height:3,background:lg,margin:"0 2px",marginBottom:18};
+            const tOn={fontSize:10,color:isR&&!step3?"#c62828":"#7b1fa2",fontWeight:700,whiteSpace:"nowrap"};
+            const tOff={fontSize:10,color:"#bbb",fontWeight:600,whiteSpace:"nowrap"};
+            return(<div style={{margin:"10px 0 14px",padding:"0 8px"}}><div style={{display:"flex",alignItems:"center"}}>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}><div style={dOn}/><span style={tOn}>대기</span></div>
+              <div style={step2?lOn:lOff}/>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}><div style={step2?dOn:dOff}/><span style={step2?tOn:tOff}>{isR?"거절":"승인"}</span></div>
+              <div style={step3?lOn:lOff}/>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}><div style={step3?dOn:dOff}/><span style={step3?tOn:tOff}>발급</span></div>
+            </div></div>);
           })()}
 
           <div>
-            <Row label="구분" value={r.category==="기타"?`기타: ${r.categoryEtc}`:r.category}/>
+            <Row label="구분" value={r.category==="기타"?`기타: ${r.category_etc}`:r.category}/>
             <Row label="매장" value={r.store}/>
-            <Row label="고객" value={masked?`${maskName(r.custName)} / ${maskPhone(r.custPhone)}`:`${r.custName} / ${r.custPhone}`}/>
-            {!masked&&r.custMember&&<Row label="회원번호" value={r.custMember}/>}
-            <Row label="사유" value={r.reason}/>
+            <Row label="고객" value={masked?`${maskName(r.cust_name)} / ${maskPhone(r.cust_phone)}`:`${r.cust_name} / ${r.cust_phone}`}/>
+            {!masked&&r.cust_member&&<Row label="회원번호" value={r.cust_member}/>}
             <Row label="세부내용" value={r.detail}/>
             <Row label="장수" value={`${r.qty}장`}/>
             <Row label="요청인" value={r.requester}/>
-            {r.approvedDate&&<Row label="승인일" value={r.approvedDate}/>}
-            {r.issuedDate&&<Row label="발급일" value={r.issuedDate}/>}
-            {r.rejectReason&&<Row label="거절사유" value={r.rejectReason}/>}
+            {r.approved_date&&<Row label="승인일" value={r.approved_date}/>}
+            {r.issued_date&&<Row label="발급일" value={r.issued_date}/>}
+            {r.reject_reason&&<Row label="거절사유" value={r.reject_reason}/>}
           </div>
 
-          {/* 관리자: 회원 메모 */}
-          {!masked&&r.custMember&&setMemberPopup&&(
+          {!masked&&r.cust_member&&setMemberPopup&&(
             <div style={{marginTop:8}}>
-              <button style={S.memberBtn} onClick={()=>setMemberPopup(memberPopup?.idx===i?null:{idx:i,note:r.memberNote||""})}>
-                {r.memberNote?"📝 회원 메모 보기/수정":"📝 회원 메모 작성"}
+              <button style={S.memberBtn} onClick={()=>setMemberPopup(memberPopup?.idx===i?null:{idx:i,note:r.member_note||""})}>
+                {r.member_note?"📝 회원 메모 보기/수정":"📝 회원 메모 작성"}
               </button>
               {memberPopup?.idx===i&&(
                 <div style={S.popupOverlay} onClick={()=>setMemberPopup(null)}>
                   <div style={S.popup} onClick={e=>e.stopPropagation()}>
                     <h3 style={{fontSize:16,fontWeight:700,marginTop:0,marginBottom:8}}>회원 메모 (관리자 전용)</h3>
-                    <p style={{fontSize:13,color:"#888",marginBottom:8}}>회원번호: {r.custMember}</p>
+                    <p style={{fontSize:13,color:"#888",marginBottom:8}}>회원번호: {r.cust_member}</p>
                     <textarea style={{...S.input,...S.textarea}} value={memberPopup.note} onChange={e=>setMemberPopup({...memberPopup,note:e.target.value})} rows={4} placeholder="메모 입력..."/>
                     <div style={{display:"flex",gap:8,marginTop:12}}>
                       <button style={S.secondaryBtn} onClick={()=>setMemberPopup(null)}>취소</button>
-                      <button style={S.primaryBtn} onClick={()=>{
-                        const u=[...requests];u[requests.indexOf(r)]={...r,memberNote:memberPopup.note};
-                        saveRequests(u);setMemberPopup(null);
-                      }}>저장</button>
+                      <button style={S.primaryBtn} onClick={()=>{updateRequest(r.id,{member_note:memberPopup.note});setMemberPopup(null);}}>저장</button>
                     </div>
                   </div>
                 </div>
@@ -330,7 +342,6 @@ function HistoryTable({requests,masked,onApprove,onReject,onIssue,onDelete,membe
             </div>
           )}
 
-          {/* 관리자: 대기 → 승인완료 / 승인거절 */}
           {onApprove&&r.status==="대기"&&(
             <div style={S.adminActions}>
               {rejectInputId===r.id?(
@@ -351,7 +362,6 @@ function HistoryTable({requests,masked,onApprove,onReject,onIssue,onDelete,membe
             </div>
           )}
 
-          {/* 관리자: 승인완료 → 발급처리 */}
           {onIssue&&r.status==="승인완료"&&(
             <div style={S.adminActions}>
               <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
@@ -365,7 +375,6 @@ function HistoryTable({requests,masked,onApprove,onReject,onIssue,onDelete,membe
             </div>
           )}
 
-          {/* 관리자: 발급처리 완료 → 삭제 */}
           {onDelete&&r.status==="발급처리"&&(
             <div style={S.adminActions}>
               {deleteConfirmId===r.id?(
@@ -388,29 +397,18 @@ function HistoryTable({requests,masked,onApprove,onReject,onIssue,onDelete,membe
 function Row({label,value}){return<div style={S.row}><span style={S.rowLabel}>{label}</span><span style={S.rowValue}>{value}</span></div>;}
 
 /* ═══ AdminView ═══ */
-function AdminView({requests,saveRequests,showToast,memberPopup,setMemberPopup,notice,saveNotice}){
+function AdminView({requests,updateRequest,removeRequest,showToast,memberPopup,setMemberPopup,notice,saveNotice}){
   const [editingNotice,setEditingNotice]=useState(false);
   const [noticeText,setNoticeText]=useState(notice);
 
-  const handleApprove=async id=>{
-    const u=requests.map(r=>r.id===id?{...r,status:"승인완료",approvedDate:new Date().toISOString().slice(0,10)}:r);
-    await saveRequests(u);showToast("✅ 승인 완료");
-  };
-  const handleReject=async(id,reason)=>{
-    const u=requests.map(r=>r.id===id?{...r,status:"승인거절",rejectReason:reason}:r);
-    await saveRequests(u);showToast("❌ 승인 거절 처리 완료");
-  };
-  const handleIssue=async(id,issuedDate)=>{
-    const u=requests.map(r=>r.id===id?{...r,status:"발급처리",issuedDate}:r);
-    await saveRequests(u);showToast("📤 발급 처리 완료");
-  };
-  const handleDelete=async id=>{
-    await saveRequests(requests.filter(r=>r.id!==id));showToast("🗑️ 삭제 완료");
-  };
+  const handleApprove=async id=>{await updateRequest(id,{status:"승인완료",approved_date:new Date().toISOString().slice(0,10)});showToast("✅ 승인 완료");};
+  const handleReject=async(id,reason)=>{await updateRequest(id,{status:"승인거절",reject_reason:reason});showToast("❌ 승인 거절 처리 완료");};
+  const handleIssue=async(id,d)=>{await updateRequest(id,{status:"발급처리",issued_date:d});showToast("📤 발급 처리 완료");};
+  const handleDelete=async id=>{await removeRequest(id);showToast("🗑️ 삭제 완료");};
 
   const downloadCSV=()=>{
-    const h=["구분","기타내용","매장","요청일","사유","고객명","연락처","회원번호","세부내용","장수","요청인","상태","승인일","발급일","거절사유","회원메모"];
-    const rows=requests.map(r=>[r.category,r.categoryEtc||"",r.store,r.date,r.reason,r.custName,r.custPhone,r.custMember||"",r.detail,r.qty,r.requester,r.status,r.approvedDate||"",r.issuedDate||"",r.rejectReason||"",r.memberNote||""]);
+    const h=["구분","기타내용","매장","요청일","고객명","연락처","회원번호","세부내용","장수","요청인","상태","승인일","발급일","거절사유","회원메모"];
+    const rows=requests.map(r=>[r.category,r.category_etc||"",r.store,r.date,r.cust_name,r.cust_phone,r.cust_member||"",r.detail,r.qty,r.requester,r.status,r.approved_date||"",r.issued_date||"",r.reject_reason||"",r.member_note||""]);
     const csv="\uFEFF"+[h,...rows].map(row=>row.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
     const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"});
     const a=document.createElement("a");a.href=URL.createObjectURL(blob);
@@ -418,13 +416,7 @@ function AdminView({requests,saveRequests,showToast,memberPopup,setMemberPopup,n
     showToast("📥 CSV 다운로드 완료");
   };
 
-  const st={
-    total:requests.length,
-    pending:requests.filter(r=>r.status==="대기").length,
-    approved:requests.filter(r=>r.status==="승인완료").length,
-    issued:requests.filter(r=>r.status==="발급처리").length,
-    rejected:requests.filter(r=>r.status==="승인거절").length,
-  };
+  const st={total:requests.length,pending:requests.filter(r=>r.status==="대기").length,approved:requests.filter(r=>r.status==="승인완료").length,issued:requests.filter(r=>r.status==="발급처리").length,rejected:requests.filter(r=>r.status==="승인거절").length};
 
   return(
     <div style={S.content}>
@@ -432,7 +424,6 @@ function AdminView({requests,saveRequests,showToast,memberPopup,setMemberPopup,n
         <h2 style={{fontSize:18,fontWeight:700,color:"#222",margin:0}}>관리자 페이지</h2>
         <button style={S.downloadBtn} onClick={downloadCSV}>📥 CSV</button>
       </div>
-
       <div style={S.statsRow}>
         <div style={{...S.statCard,borderLeft:"4px solid #7b1fa2"}}><div style={S.statNum}>{st.total}</div><div style={S.statLabel}>전체</div></div>
         <div style={{...S.statCard,borderLeft:"4px solid #e65100"}}><div style={S.statNum}>{st.pending}</div><div style={S.statLabel}>대기</div></div>
@@ -444,27 +435,21 @@ function AdminView({requests,saveRequests,showToast,memberPopup,setMemberPopup,n
       <div style={S.noticeEditor}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
           <h3 style={{fontSize:15,fontWeight:700,color:"#333",margin:0}}>📋 안내사항 관리</h3>
-          {!editingNotice?(
-            <button style={S.noticeEditBtn} onClick={()=>{setNoticeText(notice);setEditingNotice(true);}}>수정</button>
-          ):(
-            <div style={{display:"flex",gap:6}}>
-              <button style={S.cancelBtn} onClick={()=>setEditingNotice(false)}>취소</button>
-              <button style={S.noticeSaveBtn} onClick={async()=>{await saveNotice(noticeText);setEditingNotice(false);showToast("✅ 안내사항 저장 완료");}}>저장</button>
-            </div>
-          )}
+          {!editingNotice?(<button style={S.noticeEditBtn} onClick={()=>{setNoticeText(notice);setEditingNotice(true);}}>수정</button>
+          ):(<div style={{display:"flex",gap:6}}>
+            <button style={S.cancelBtn} onClick={()=>setEditingNotice(false)}>취소</button>
+            <button style={S.noticeSaveBtn} onClick={async()=>{await saveNotice(noticeText);setEditingNotice(false);showToast("✅ 안내사항 저장 완료");}}>저장</button>
+          </div>)}
         </div>
-        {editingNotice?(
-          <textarea style={{...S.input,...S.textarea,minHeight:120}} value={noticeText} onChange={e=>setNoticeText(e.target.value)} placeholder="안내사항을 입력해주세요..."/>
-        ):(
-          <div style={S.noticePreview}>
-            {notice?notice.split("\n").map((l,i)=><p key={i} style={{fontSize:13,color:"#444",lineHeight:1.7,margin:0}}>{l||"\u00A0"}</p>)
-              :<p style={{color:"#999",fontSize:13}}>등록된 안내사항이 없습니다.</p>}
-          </div>
-        )}
+        {editingNotice?(<textarea style={{...S.input,...S.textarea,minHeight:120}} value={noticeText} onChange={e=>setNoticeText(e.target.value)} placeholder="안내사항을 입력해주세요..."/>
+        ):(<div style={S.noticePreview}>
+          {notice?notice.split("\n").map((l,i)=><p key={i} style={{fontSize:13,color:"#444",lineHeight:1.7,margin:0}}>{l||"\u00A0"}</p>)
+            :<p style={{color:"#999",fontSize:13}}>등록된 안내사항이 없습니다.</p>}
+        </div>)}
       </div>
 
       <HistoryTable requests={requests} masked={false} onApprove={handleApprove} onReject={handleReject} onIssue={handleIssue} onDelete={handleDelete}
-        memberPopup={memberPopup} setMemberPopup={setMemberPopup} saveRequests={saveRequests}/>
+        memberPopup={memberPopup} setMemberPopup={setMemberPopup} updateRequest={updateRequest}/>
     </div>
   );
 }
@@ -472,7 +457,8 @@ function AdminView({requests,saveRequests,showToast,memberPopup,setMemberPopup,n
 /* ═══ Styles ═══ */
 const S={
   root:{fontFamily:"'Pretendard',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",background:"#f5f5f7",minHeight:"100vh",maxWidth:480,margin:"0 auto",position:"relative",WebkitTextSizeAdjust:"100%"},
-  loading:{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",color:"#999",fontSize:15},
+  loading:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100vh"},
+  spinner:{width:32,height:32,border:"3px solid #eee",borderTop:"3px solid #7b1fa2",borderRadius:"50%",animation:"spin 0.8s linear infinite"},
   toast:{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",background:"#333",color:"#fff",padding:"10px 20px",borderRadius:10,fontSize:13,zIndex:9999,boxShadow:"0 4px 16px rgba(0,0,0,0.2)",maxWidth:"90vw",textAlign:"center"},
   header:{background:"linear-gradient(135deg,#7b1fa2,#9c27b0)",padding:"14px 16px 10px",position:"sticky",top:0,zIndex:100},
   logo:{display:"flex",alignItems:"center",gap:8,marginBottom:10},
@@ -502,17 +488,6 @@ const S={
   card:{background:"#fff",borderRadius:14,padding:14,marginBottom:12,boxShadow:"0 1px 4px rgba(0,0,0,0.06)"},
   cardHeader:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4},
   statusBadge:{padding:"3px 10px",borderRadius:20,fontSize:11,fontWeight:700},
-  // Progress bar
-  progressWrap:{margin:"10px 0 14px",padding:"0 4px"},
-  progressTrack:{display:"flex",alignItems:"center"},
-  progressStep:{display:"flex",flexDirection:"column",alignItems:"center",gap:4,flex:"0 0 auto"},
-  progressDot:{width:10,height:10,borderRadius:"50%",background:"#ddd",transition:"all 0.3s"},
-  progressLabel:{fontSize:10,color:"#bbb",fontWeight:600,whiteSpace:"nowrap"},
-  progressLine:{flex:1,height:3,background:"#eee",margin:"0 -2px",marginBottom:18},
-  progressDone:{},
-  progressReject:{},
-  progressLineDone:{},
-  progressLineReject:{},
   row:{display:"flex",padding:"5px 0",borderBottom:"1px solid #f5f5f5",gap:6},
   rowLabel:{fontSize:12,color:"#999",minWidth:62,flexShrink:0,fontWeight:500},
   rowValue:{fontSize:13,color:"#333",flex:1,wordBreak:"break-word"},
