@@ -306,19 +306,24 @@ function HistoryTable({requests,masked,onApprove,onReject,onIssue,onDelete,membe
             </div></div>);
           })()}
 
-          <div>
+          {(()=>{
+            let isExpired=false;
+            if(r.issued_date){const ed=new Date(r.issued_date);ed.setDate(ed.getDate()+1);isExpired=new Date()>ed;}
+
+            return(<div>
             <Row label="구분" value={r.category==="기타"?`기타: ${r.category_etc}`:r.category}/>
             <Row label="매장" value={r.store}/>
             <Row label="고객" value={masked?`${maskName(r.cust_name)} / ${maskPhone(r.cust_phone)}`:`${r.cust_name} / ${r.cust_phone}`}/>
             {!masked&&r.cust_member&&<Row label="회원번호" value={r.cust_member}/>}
-            <Row label="세부내용" value={r.detail}/>
+            <Row label="세부내용" value={masked&&isExpired?"발급 완료되어 블라인드 처리되었습니다":r.detail}/>
             <Row label="장수" value={`${r.qty}장`}/>
             <Row label="요청인" value={r.requester}/>
             {r.approved_date&&<Row label="승인일" value={r.approved_date}/>}
             {r.issued_date&&<Row label="발급(승인)일" value={r.issued_date}/>}
             {r.issued_date&&(()=>{const d=new Date(r.issued_date);d.setDate(d.getDate()+1);return<Row label="발급 예정일" value={d.toISOString().slice(0,10)}/>;})()}
             {r.reject_reason&&<Row label="거절사유" value={r.reject_reason}/>}
-          </div>
+            </div>);
+          })()}
 
           {!masked&&r.cust_member&&setMemberPopup&&(
             <div style={{marginTop:8}}>
