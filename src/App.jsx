@@ -145,6 +145,8 @@ function RequestForm({ addRequest, showToast, onGoHistory, notice }) {
     if(v("requester")&&!/\S+@\S+\.\S+/.test(v("requester"))) errs.requester=true;
     const ph=v("custPhone").replace(/-/g,"");
     if(ph&&!/^01[016789]\d{7,8}$/.test(ph)) errs.custPhone=true;
+    const mb=v("custMember");
+    if(mb&&(!/^\d{10}$/.test(mb)||!mb.startsWith("7"))) errs.custMemberFormat=true;
     setErrors(errs);
     if(!agreeNotice) setAgreeError(true);
     return Object.keys(errs).length===0 && agreeNotice;
@@ -213,8 +215,9 @@ function RequestForm({ addRequest, showToast, onGoHistory, notice }) {
       <F label="고객 성명" err={errors.custName}><input ref={refs.custName} defaultValue="" style={{...S.input,...eS("custName")}}/></F>
       <F label="고객 핸드폰 번호" err={errors.custPhone}><input ref={refs.custPhone} defaultValue="" placeholder="010-0000-0000" inputMode="tel" style={{...S.input,...eS("custPhone")}}/></F>
       <F label="고객 회원번호" err={errors.custMember}>
-        <input ref={refs.custMember} defaultValue="" placeholder="회원번호 입력" style={{...S.input,...eS("custMember")}}/>
+        <input ref={refs.custMember} defaultValue="" placeholder="7로 시작하는 10자리 숫자" inputMode="numeric" style={{...S.input,...eS("custMember"),...(errors.custMemberFormat?S.inputError:{})}}/>
         <p style={{fontSize:12,color:"#888",margin:"5px 0 0 2px"}}>※ BO에서 검색하여 입력해주세요</p>
+        {errors.custMemberFormat&&<span style={S.errorSmall}>회원번호는 7로 시작하는 10자리 숫자여야 합니다</span>}
       </F>
       <F label="세부내용 (클레임 내용)" err={errors.detail}><textarea ref={refs.detail} defaultValue="" rows={4} style={{...S.input,...S.textarea,...eS("detail")}}/></F>
       <F label="요청 식사권 장수" err={errors.qty}><input ref={refs.qty} type="number" min={1} defaultValue="1" inputMode="numeric" style={{...S.input,...eS("qty"),width:120}}/></F>
